@@ -1,5 +1,20 @@
-# Python virtual environment
+# Python
+__pycache__/
+*.pyc
 venv/
 
 # Environment variables
 .env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Screenshots and debug output
+*.png
+*.hprof
+*.trace
+*.bugreport

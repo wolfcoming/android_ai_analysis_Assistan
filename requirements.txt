@@ -1,0 +1,17 @@
+# LangChain
+langchain==1.0.8
+langchain-core==1.0.7
+langchain-classic==1.0.0
+langchain-deepseek==1.0.1
+langchain-openai==1.0.3
+
+# Web 框架
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-dotenv==1.0.1
+
+# Pydantic
+pydantic==2.10.4
+
+# SSE
+sse-starlette==2.1.3
