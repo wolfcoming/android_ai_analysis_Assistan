@@ -118,7 +118,14 @@ def get_app_memory_raw(package_name: str) -> dict:
 
     for line in raw.split("\n"):
         line = line.strip()
+        # 兼容新旧 Android 版本的 PSS 格式
+        # 旧: "TOTAL PSS:   194538"
+        # 新: "       TOTAL:   194538       TOTAL SWAP PSS:    34221"
         if "TOTAL PSS:" in line:
+            mem["pss_total"] = _extract_kb(line)
+        elif "TOTAL:" in line:
+            # 新格式: "TOTAL:   195096       TOTAL SWAP PSS:    34213"
+            # _extract_kb 取第一个数值即 PSS
             mem["pss_total"] = _extract_kb(line)
         elif "TOTAL RSS:" in line:
             mem["rss_total"] = _extract_kb(line)
@@ -128,7 +135,7 @@ def get_app_memory_raw(package_name: str) -> dict:
             mem["native_heap"] = _extract_kb(line)
         elif line.startswith("Code:") and "Heap" not in line:
             mem["code"] = _extract_kb(line)
-        elif "Stack:" in line:
+        elif line.startswith("Stack:"):
             mem["stack"] = _extract_kb(line)
         elif "Graphics:" in line:
             mem["graphics"] = _extract_kb(line)

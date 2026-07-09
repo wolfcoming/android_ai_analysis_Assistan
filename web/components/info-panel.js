@@ -28,7 +28,7 @@ var InfoPanel = {
 
         <!-- 实时性能指标 -->
         <div class="info-section">
-            <h3>⚡ 实时性能 <span style="font-size:11px;color:#888;">(2s刷新)</span></h3>
+            <h3>⚡ 实时性能 <span style="font-size:11px;color:#888;">(2s刷新，支持悬停查看详细说明)</span></h3>
             <div class="metric-row">
                 <span class="metric-badge">PSS: <span class="val">{{ fmtMem(metrics.pss_total) }}MB</span></span>
                 <span class="metric-badge">Java Heap: <span class="val">{{ fmtMem(metrics.java_heap) }}MB</span></span>

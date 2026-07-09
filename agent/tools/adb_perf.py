@@ -33,30 +33,45 @@ def get_frame_info(package_name: str) -> str:
     total_render = 0.0
     total_draw = 0.0
 
+    # 优先用新版格式: "Stats since:" → "Total frames rendered:" / "Janky frames:"
     for line in raw.split("\n"):
         line = line.strip()
-        if "---PROFILEDATA---" in line:
-            in_profile = True
-            continue
-        if not in_profile:
-            continue
-        if line.startswith("---") or not line:
-            break
-
-        parts = line.split(",")
-        if len(parts) >= 3:
+        if "Total frames rendered:" in line:
             try:
-                flags = int(parts[0])
-                intended_vsync = float(parts[1])
-                frame_completed = float(parts[2])
-                if intended_vsync > 0 and frame_completed > 0:
-                    frame_ms = (frame_completed - intended_vsync) / 1000000.0
-                    frame_count += 1
-                    if frame_ms > 16.67:  # 超过 60fps 阈值
-                        janky_count += 1
-                    total_render += frame_ms
-            except (ValueError, IndexError):
+                frame_count = int(line.split(":")[1].strip())
+            except ValueError:
+                pass
+        elif "Janky frames:" in line:
+            try:
+                janky_count = int(line.split(":")[1].strip().split()[0])
+            except ValueError:
+                pass
+
+    # 如果新版格式没数据，回退到旧版 PROFILEDATA 格式
+    if frame_count == 0:
+        for line in raw.split("\n"):
+            line = line.strip()
+            if "---PROFILEDATA---" in line:
+                in_profile = True
                 continue
+            if not in_profile:
+                continue
+            if line.startswith("---") or not line:
+                break
+            parts = line.split(",")
+            if len(parts) >= 3:
+                try:
+                    flags = int(parts[0])
+                    intended_vsync = float(parts[1])
+                    frame_completed = float(parts[2])
+                    if intended_vsync > 0 and frame_completed > 0:
+                        frame_ms = (frame_completed - intended_vsync) / 1000000.0
+                        frame_count += 1
+                        if frame_ms > 16.67:  # 超过 60fps 阈值
+                            janky_count += 1
+                        total_render += frame_ms
+                except (ValueError, IndexError):
+                    continue
 
     if frame_count == 0:
         result_lines.append("  ⚠️ 帧数据为空，请先在手机上操作一下应用（滑动/点击），再重新查询。")
@@ -91,71 +106,87 @@ def get_cpu_info(package_name: str) -> str:
     if not package_name:
         return "错误：请提供应用包名"
 
-    raw = _run_adb(f"shell top -n 1 -b | grep {package_name}", timeout=10)
+    raw = _run_adb(f"shell top -n 1 | grep {package_name}", timeout=10)
     if not raw or raw == "(无输出)":
         return f"未找到应用 '{package_name}' 的进程，请确认应用正在运行。"
 
     result_lines = [f"=== {package_name} CPU 使用情况 ==="]
     for line in raw.split("\n"):
         parts = line.split()
-        if len(parts) >= 9:
-            result_lines.append(f"  PID: {parts[1]} | CPU: {parts[8]}% | 进程: {parts[-1]}")
+        # top 输出格式: PID USER PR NI CPU% S #THR VSS RSS PCY Name
+        if len(parts) >= 10:
+            result_lines.append(f"  PID: {parts[0]} | CPU: {parts[4]} | 进程: {parts[9]}")
 
     return "\n".join(result_lines)
 
 
 def get_cpu_info_raw(package_name: str) -> dict:
     """返回 CPU 信息的字典格式（供后端 API 使用）"""
-    raw = _run_adb(f"shell top -n 1 -b | grep {package_name}", timeout=10)
+    raw = _run_adb(f"shell top -n 1 | grep {package_name}", timeout=10)
     cpu_total = 0.0
     for line in raw.split("\n"):
         parts = line.split()
-        if len(parts) >= 9:
+        # top 输出格式: PID USER PR NI CPU% S #THR VSS RSS PCY Name
+        if len(parts) >= 10:
             try:
-                cpu_total += float(parts[8].replace("%", ""))
+                cpu_total += float(parts[4].replace("%", ""))
             except ValueError:
                 continue
     return {"cpu_percent": round(cpu_total, 1)}
 
 
 def get_frame_info_raw(package_name: str) -> dict:
-    """返回帧率信息的字典格式（供后端 API 使用）"""
-    _run_adb(f"shell dumpsys gfxinfo {package_name} reset", timeout=5)
-    time.sleep(0.5)
+    """返回帧率信息的字典格式（供后端 SSE 实时采集，不 reset 以免破坏累积数据）"""
     raw = _run_adb(f"shell dumpsys gfxinfo {package_name}", timeout=15)
 
     frame_count = 0
     janky_count = 0
     total_render = 0.0
-    in_profile = False
 
+    # 优先用新版格式: "Stats since:" → "Total frames rendered:" / "Janky frames:"
     for line in raw.split("\n"):
         line = line.strip()
-        if "---PROFILEDATA---" in line:
-            in_profile = True
-            continue
-        if not in_profile:
-            continue
-        if line.startswith("---") or not line:
-            break
-        parts = line.split(",")
-        if len(parts) >= 3:
+        if "Total frames rendered:" in line:
             try:
-                intended_vsync = float(parts[1])
-                frame_completed = float(parts[2])
-                if intended_vsync > 0 and frame_completed > 0:
-                    frame_ms = (frame_completed - intended_vsync) / 1000000.0
-                    frame_count += 1
-                    if frame_ms > 16.67:
-                        janky_count += 1
-                    total_render += frame_ms
-            except (ValueError, IndexError):
+                frame_count = int(line.split(":")[1].strip())
+            except ValueError:
+                pass
+        elif "Janky frames:" in line:
+            try:
+                janky_count = int(line.split(":")[1].strip().split()[0])
+            except ValueError:
+                pass
+
+    # 如果新版格式没数据，回退到旧版 PROFILEDATA 格式
+    if frame_count == 0:
+        in_profile = False
+        for line in raw.split("\n"):
+            line = line.strip()
+            if "---PROFILEDATA---" in line:
+                in_profile = True
                 continue
+            if not in_profile:
+                continue
+            if line.startswith("---") or not line:
+                break
+            parts = line.split(",")
+            if len(parts) >= 3:
+                try:
+                    intended_vsync = float(parts[1])
+                    frame_completed = float(parts[2])
+                    if intended_vsync > 0 and frame_completed > 0:
+                        frame_ms = (frame_completed - intended_vsync) / 1000000.0
+                        frame_count += 1
+                        if frame_ms > 16.67:
+                            janky_count += 1
+                        total_render += frame_ms
+                except (ValueError, IndexError):
+                    continue
 
     return {
         "frame_count": frame_count,
         "janky_count": janky_count,
         "janky_percent": round((janky_count / frame_count) * 100, 1) if frame_count > 0 else 0,
-        "avg_frame_ms": round(total_render / frame_count, 2) if frame_count > 0 else 0,
+        "avg_frame_ms": round(total_render / frame_count, 2) if frame_count > 0 and total_render > 0 else 0,
         "estimated_fps": round(1000.0 / (total_render / frame_count), 1) if frame_count > 0 and total_render > 0 else 0,
     }

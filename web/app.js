@@ -5,7 +5,7 @@
 // ============================================================
 var TrendChart = {
     name: 'TrendChart',
-    template: '<div class="chart-container"><canvas :ref="chartId"></canvas></div>',
+    template: '<div class="chart-container"><div class="chart-legend">{{ label }}</div><canvas ref="chartCanvas"></canvas></div>',
     props: {
         chartId: { type: String, required: true },
         label: { type: String, default: '' },
@@ -14,13 +14,17 @@ var TrendChart = {
         unit: { type: String, default: '' },
         maxPoints: { type: Number, default: 150 },
     },
-    data() {
-        return { chart: null, dataPoints: [] };
+    data: function() {
+        return { _unit: '', _isMemory: false };
     },
-    mounted() {
-        var ctx = this.$refs[this.chartId]?.getContext('2d');
-        if (!ctx) return;
-        this.chart = new Chart(ctx, {
+    mounted: function() {
+        var self = this;
+        this._unit = this.unit;
+        this._isMemory = (this.dataKey === 'pss_total' || this.dataKey === 'java_heap' || this.dataKey === 'native_heap');
+        var canvas = this.$refs.chartCanvas;
+        if (!canvas) return;
+        var ctx = canvas.getContext('2d');
+        this._chart = Vue.markRaw(new Chart(ctx, {
             type: 'line',
             data: {
                 labels: [],
@@ -47,23 +51,30 @@ var TrendChart = {
                         ticks: {
                             color: '#888',
                             font: { size: 10 },
-                            callback: function(v) { return v + this.unit; },
+                            callback: function(v) { return v.toFixed(1) + self._unit; },
                             maxTicksLimit: 4,
                         },
                         grid: { color: '#2a2a4a' },
                     },
                 },
             },
-        });
+        }));
     },
     methods: {
         updateChart: function(dataList) {
-            if (!this.chart || !dataList.length) return;
-            var labels = dataList.map(function(_, i) { return i; });
-            var values = dataList.map(function(d) { return d[this.dataKey] || 0; }, this);
-            this.chart.data.labels = labels;
-            this.chart.data.datasets[0].data = values;
-            this.chart.update('none');
+            if (!this._chart || !dataList || !dataList.length) return;
+            var dk = this.dataKey;
+            var isMem = this._isMemory;
+            var labels = [];
+            var values = [];
+            for (var i = 0; i < dataList.length; i++) {
+                labels.push(i);
+                var v = dataList[i][dk] || 0;
+                values.push(isMem ? +(v / 1024).toFixed(1) : v);
+            }
+            this._chart.data.labels = labels;
+            this._chart.data.datasets[0].data = values;
+            this._chart.update('none');
         },
     },
 };
@@ -88,12 +99,30 @@ var ChatPanel = {
                 </div>
             </div>
             <div v-for="(msg, idx) in messages" :key="idx" :class="'msg ' + msg.role">
+                <div v-if="msg.thinking && msg.thinking.length" class="thinking-history">
+                    <div v-for="(th, ti) in msg.thinking" :key="ti" class="th-block">
+                        <span class="th-label">{{ th.label }}</span>
+                        <span class="th-text">{{ th.content }}</span>
+                    </div>
+                </div>
                 <div class="bubble" v-html="renderMarkdown(msg.content)"></div>
                 <div v-if="msg.tools && msg.tools.length" class="tools-info">
-                    {{ msg.tools.map(function(t){return t.tool}).join(', ') }}
+                    <div v-for="(t, i) in msg.tools" :key="i" class="tool-line">
+                        <span class="tool-done">✅ {{ t.name }}</span>
+                    </div>
                 </div>
             </div>
-            <div v-if="loading" class="loading">正在分析...</div>
+            <div v-if="loading" class="thinking-box">
+                <div class="thinking-status">{{ thinkingStatus }}</div>
+                <div v-for="(th, i) in thinkingSteps" :key="'th'+i" class="th-live">
+                    <span class="th-live-icon">💭</span>
+                    <span class="th-live-text">{{ th.content }}</span>
+                </div>
+                <div v-for="(t, i) in runningTools" :key="'rt'+i" class="tool-line">
+                    <span v-if="t.status === 'running'" class="tool-running">⏳ {{ t.name }}: {{ t.detail }}</span>
+                    <span v-else class="tool-done">✅ {{ t.name }}: {{ t.detail }}</span>
+                </div>
+            </div>
         </div>
         <div class="chat-input-area">
             <input
@@ -111,17 +140,34 @@ var ChatPanel = {
             input: '',
             messages: [],
             loading: false,
+            thinkingStatus: '',
+            thinkingSteps: [],
+            runningTools: [],
             chatHistory: [],
         };
+    },
+    mounted: function() {
+        var self = this;
+        window.addEventListener('agent-quick-action', function(e) {
+            if (e.detail && e.detail.message) {
+                self.input = e.detail.message;
+                self.sendMessage();
+            }
+        });
     },
     methods: {
         sendMessage: async function() {
             var text = this.input.trim();
             if (!text || this.loading) return;
 
-            this.messages.push({ role: 'user', content: text, tools: [] });
+            this.messages.push({ role: 'user', content: text, tools: [], thinking: [] });
             this.input = '';
             this.loading = true;
+            this.thinkingStatus = '正在分析...';
+            this.thinkingSteps = [];
+            this.runningTools = [];
+            var savedThinking = [];
+            var savedTools = [];
             var self = this;
             this.$nextTick(function() { self.scrollToBottom(); });
 
@@ -134,17 +180,96 @@ var ChatPanel = {
                         chat_history: this.chatHistory,
                     }),
                 });
-                var data = await res.json();
-                var tools = data.intermediate_steps || [];
 
+                // 流式读取 SSE 响应
+                var reader = res.body.getReader();
+                var decoder = new TextDecoder();
+                var buffer = '';
+                var toolList = [];
+                var finalOutput = '';
+
+                while (true) {
+                    var result = await reader.read();
+                    if (result.done) break;
+
+                    buffer += decoder.decode(result.value, { stream: true });
+                    var lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (var i = 0; i < lines.length; i++) {
+                        var line = lines[i].trim();
+                        if (!line.startsWith('data: ')) continue;
+
+                        var jsonStr = line.substring(6);
+                        try {
+                            var event = JSON.parse(jsonStr);
+
+                            if (event.type === 'thinking') {
+                                var brief = event.content.length > 120
+                                    ? event.content.substring(0, 120) + '...'
+                                    : event.content;
+                                this.thinkingSteps.push({ content: brief });
+                                savedThinking.push({
+                                    label: 'LLM 推理',
+                                    content: event.content,
+                                });
+                                this.thinkingStatus = 'LLM 正在推理...';
+                                this.$nextTick(function() { self.scrollToBottom(); });
+
+                            } else if (event.type === 'tool_start') {
+                                var toolEntry = {
+                                    name: event.tool,
+                                    detail: typeof event.input === 'string'
+                                        ? event.input.substring(0, 100)
+                                        : JSON.stringify(event.input).substring(0, 100),
+                                    status: 'running',
+                                };
+                                this.runningTools.push(toolEntry);
+                                this.thinkingStatus = '调用工具: ' + event.tool;
+                                savedTools.push({ name: event.tool });
+                                this.$nextTick(function() { self.scrollToBottom(); });
+
+                            } else if (event.type === 'tool_end') {
+                                for (var j = this.runningTools.length - 1; j >= 0; j--) {
+                                    if (this.runningTools[j].status === 'running') {
+                                        this.runningTools[j].status = 'done';
+                                        this.runningTools[j].detail = event.output
+                                            ? event.output.substring(0, 100)
+                                            : '完成';
+                                        break;
+                                    }
+                                }
+                                this.thinkingStatus = '分析结果中...';
+                                this.$nextTick(function() { self.scrollToBottom(); });
+
+                            } else if (event.type === 'tool_error') {
+                                for (var k = this.runningTools.length - 1; k >= 0; k--) {
+                                    if (this.runningTools[k].status === 'running') {
+                                        this.runningTools[k].status = 'done';
+                                        this.runningTools[k].detail = '❌ ' + event.error.substring(0, 80);
+                                        break;
+                                    }
+                                }
+                            } else if (event.type === 'output') {
+                                finalOutput = event.content;
+                                this.thinkingStatus = '生成回复中...';
+                            }
+                        } catch (e) {
+                            // 跳过非 JSON 行
+                        }
+                    }
+                }
+
+                // 流结束，添加最终回复
                 this.messages.push({
                     role: 'agent',
-                    content: data.output || '抱歉，没有获取到回复。',
-                    tools: tools,
+                    content: finalOutput || '抱歉，没有获取到回复。',
+                    tools: savedTools,
+                    thinking: savedThinking,
                 });
 
                 this.chatHistory.push(['human', text]);
-                this.chatHistory.push(['ai', data.output || '']);
+                this.chatHistory.push(['ai', finalOutput || '']);
                 if (this.chatHistory.length > 20) {
                     this.chatHistory = this.chatHistory.slice(-20);
                 }
@@ -153,9 +278,13 @@ var ChatPanel = {
                     role: 'agent',
                     content: '请求失败: ' + err.message,
                     tools: [],
+                    thinking: [],
                 });
             } finally {
                 this.loading = false;
+                this.thinkingStatus = '';
+                this.thinkingSteps = [];
+                this.runningTools = [];
                 var self2 = this;
                 this.$nextTick(function() { self2.scrollToBottom(); });
             }
@@ -205,12 +334,12 @@ var InfoPanel = {
         <div class="info-section">
             <h3>实时性能 <span style="font-size:11px;color:#888;">(2s刷新)</span></h3>
             <div class="metric-row">
-                <span class="metric-badge">PSS: <span class="val">{{ fmtMem(metrics.pss_total) }}MB</span></span>
-                <span class="metric-badge">Java Heap: <span class="val">{{ fmtMem(metrics.java_heap) }}MB</span></span>
-                <span class="metric-badge">Native Heap: <span class="val">{{ fmtMem(metrics.native_heap) }}MB</span></span>
-                <span class="metric-badge">CPU: <span class="val">{{ metrics.cpu_percent }}%</span></span>
-                <span class="metric-badge">FPS: <span class="val">{{ metrics.estimated_fps }}</span></span>
-                <span class="metric-badge">掉帧: <span class="val">{{ metrics.janky_count }}/{{ metrics.frame_count }}</span></span>
+                <span class="metric-badge" title="Proportional Set Size — 应用实际占用的物理内存（含按比例分摊的共享库），是评估内存占用的核心指标。持续上涨可能表示内存泄漏。">PSS: <span class="val">{{ fmtMem(metrics.pss_total) }}MB</span></span>
+                <span class="metric-badge" title="Java 虚拟机堆内存 — Dalvik/ART 为 Java/Kotlin 对象分配的内存。频繁 GC 或堆持续增长通常意味着对象分配过多或存在泄漏。">Java Heap: <span class="val">{{ fmtMem(metrics.java_heap) }}MB</span></span>
+                <span class="metric-badge" title="Native 堆内存 — C/C++ 代码通过 malloc/new 分配的内存，如媒体编解码、游戏引擎、自定义 Native 库。泄漏时 GC 无法回收。">Native Heap: <span class="val">{{ fmtMem(metrics.native_heap) }}MB</span></span>
+                <span class="metric-badge" title="CPU 使用率 — 应用所有进程的 CPU 占用百分比。持续高于 30% 需关注，可能由密集计算、死循环或错误的重绘逻辑导致。">CPU: <span class="val">{{ metrics.cpu_percent }}%</span></span>
+                <span class="metric-badge" title="每秒渲染帧数 — 基于 dumpsys gfxinfo 统计。60fps 为流畅基准，低于 30fps 用户能明显感知卡顿。需在滑动/动画时观察。">FPS: <span class="val">{{ metrics.estimated_fps }}</span></span>
+                <span class="metric-badge" title="掉帧数 / 总渲染帧数 — Janky frame 指渲染耗时超过 16.67ms 的帧（低于 60fps）。比率越高卡顿越严重。">掉帧: <span class="val">{{ metrics.janky_count }}/{{ metrics.frame_count }}</span></span>
             </div>
         </div>
 
@@ -229,7 +358,7 @@ var InfoPanel = {
                 <button disabled title="待完善">导出诊断报告</button>
                 <button disabled title="待完善">切换设备</button>
                 <button disabled title="待完善">保存对话历史</button>
-                <button disabled title="待完善">一键内存诊断</button>
+                <button @click="quickMemoryDiagnosis" title="一键内存诊断">一键内存诊断</button>
                 <button disabled title="待完善">一键卡顿诊断</button>
             </div>
         </div>
@@ -306,6 +435,7 @@ var InfoPanel = {
                     if (self.trendData.length > 150) {
                         self.trendData = self.trendData.slice(-150);
                     }
+                    self.updateCharts();
                 } catch (e) { /* ignore */ }
             };
             this.evtSource.onerror = function() {
@@ -336,6 +466,15 @@ var InfoPanel = {
         fmtMem: function(kb) {
             if (!kb) return '0.0';
             return (kb / 1024).toFixed(1);
+        },
+        quickMemoryDiagnosis: function() {
+            if (!this.targetApp) {
+                alert('请先在「目标应用」中输入包名（如 com.tencent.mm）并点击确认');
+                return;
+            }
+            window.dispatchEvent(new CustomEvent('agent-quick-action', {
+                detail: { message: '请对 ' + this.targetApp + ' 执行一键内存诊断（memory diagnosis），找出内存占用最大的类' }
+            }));
         },
     },
 };

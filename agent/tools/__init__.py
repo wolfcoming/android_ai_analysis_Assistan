@@ -2,6 +2,7 @@ from agent.tools.adb_device import get_device_info, execute_adb_command, list_fi
 from agent.tools.adb_app import get_app_info, get_app_memory
 from agent.tools.adb_perf import get_frame_info, get_cpu_info
 from agent.tools.adb_system import capture_screenshot, get_crash_logs, get_anr_info
+from agent.tools.adb_dump import memory_diagnosis
 
 __all__ = [
     "execute_adb_command",
@@ -14,4 +15,5 @@ __all__ = [
     "capture_screenshot",
     "get_crash_logs",
     "get_anr_info",
+    "memory_diagnosis",
 ]

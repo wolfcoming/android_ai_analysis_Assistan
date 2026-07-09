@@ -14,6 +14,7 @@ from server.history import get_trend_cache
 
 _last_collection_time = 0
 _collection_lock = asyncio.Lock()
+_last_frame_totals = {}  # {package_name: (last_frame_count, last_janky_count)}
 
 
 async def collect_metrics(package_name: str) -> dict:
@@ -52,11 +53,29 @@ async def collect_metrics(package_name: str) -> dict:
 
     try:
         frame = await loop.run_in_executor(None, get_frame_info_raw, package_name)
+        raw_frame_count = frame.get("frame_count", 0)
+        raw_janky_count = frame.get("janky_count", 0)
+
+        # 增量计算：对比上次采集，得出这 2 秒内的新帧
+        prev = _last_frame_totals.get(package_name)
+        if prev is None:
+            # 首次读取：设为基线，不报告帧数据（避免历史累计数据被当作增量）
+            _last_frame_totals[package_name] = (raw_frame_count, raw_janky_count)
+            delta_frames = 0
+            delta_janky = 0
+            est_fps = 0
+        else:
+            delta_frames = max(0, raw_frame_count - prev[0])
+            delta_janky = max(0, raw_janky_count - prev[1])
+            _last_frame_totals[package_name] = (raw_frame_count, raw_janky_count)
+            # 用增量计算实时 FPS（2 秒间隔）
+            est_fps = round(delta_frames / 2.0, 1) if delta_frames > 0 else 0
+
         data.update({
-            "frame_count": frame.get("frame_count", 0),
-            "janky_count": frame.get("janky_count", 0),
-            "janky_percent": frame.get("janky_percent", 0),
-            "estimated_fps": frame.get("estimated_fps", 0),
+            "frame_count": delta_frames if delta_frames >= 0 else 0,
+            "janky_count": delta_janky if delta_janky >= 0 else 0,
+            "janky_percent": round((delta_janky / delta_frames) * 100, 1) if delta_frames > 0 else 0,
+            "estimated_fps": est_fps,
         })
     except Exception as e:
         data["frame_error"] = str(e)

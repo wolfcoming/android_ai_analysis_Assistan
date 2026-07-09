@@ -36,7 +36,19 @@
         .msg .bubble code { background: #0a0a1a; padding: 2px 4px; border-radius: 3px; font-size: 12px; }
         .msg .bubble table { border-collapse: collapse; width: 100%; margin: 6px 0; font-size: 13px; }
         .msg .bubble table th, .msg .bubble table td { border: 1px solid #2a2a4a; padding: 4px 8px; text-align: left; }
-        .msg .tools-info { font-size: 11px; color: #666; margin-top: 4px; }
+        .thinking-box { background: #0f3460; border: 1px solid #533483; border-radius: 8px; padding: 10px 14px; margin: 4px 0; }
+        .thinking-status { font-size: 13px; color: #0abde3; font-weight: 600; margin-bottom: 4px; }
+        .thinking-history { margin-bottom: 6px; }
+        .th-block { padding: 3px 0; font-size: 12px; color: #aaa; }
+        .th-label { color: #0abde3; font-weight: 600; margin-right: 6px; }
+        .th-text { color: #999; font-style: italic; }
+        .th-live { padding: 2px 0; font-size: 12px; color: #aaa; }
+        .th-live-icon { margin-right: 4px; }
+        .th-live-text { color: #999; font-style: italic; }
+        .msg .tools-info { margin-top: 6px; padding-top: 6px; border-top: 1px solid #2a2a4a; }
+        .tool-line { font-size: 11px; padding: 2px 0; }
+        .tool-running { color: #f0a500; }
+        .tool-done { color: #2ecc71; }
         .loading { color: #e94560; font-size: 14px; padding: 10px 0; }
         /* 右侧信息面板 */
         .info-panel { width: 55%; display: flex; flex-direction: column; overflow-y: auto; }
@@ -47,7 +59,8 @@
         .info-item .label { color: #888; }
         .info-item .value { color: #e0e0e0; font-weight: 500; }
         .no-device { padding: 40px; text-align: center; color: #888; }
-        .chart-container { height: 160px; margin: 8px 0; position: relative; }
+        .chart-container { height: 170px; margin: 10px 0; position: relative; }
+        .chart-legend { position: absolute; top: 4px; left: 8px; font-size: 11px; color: #aaa; z-index: 1; font-weight: 600; padding: 1px 6px; background: rgba(22,22,46,0.85); border-radius: 3px; }
         .metric-row { display: flex; flex-wrap: wrap; gap: 6px; }
         .metric-badge { background: #0f3460; padding: 4px 10px; border-radius: 4px; font-size: 12px; }
         .metric-badge .val { color: #e94560; font-weight: 600; margin-left: 4px; }
