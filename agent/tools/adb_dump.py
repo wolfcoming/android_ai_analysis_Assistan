@@ -2,13 +2,21 @@
 
 import os
 import subprocess
+import shutil
 import tempfile
+import time
 from typing import Optional
 
 from langchain_core.tools import tool
 
 from .hprof_parser import parse_hprof_file
 from .adb_device import _run_adb
+
+# dump 文件保留目录（供用户下载，用 Android Studio 打开分析）
+_DUMPS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "web", "dumps"
+)
 
 
 @tool
@@ -44,8 +52,27 @@ def memory_diagnosis(package_name: str) -> str:
         lines.append(f"> 已自动回退到 dumpsys meminfo 分析。如需完整 heap dump 分析，请使用 Android Studio Profiler。")
     else:
         lines.append(f"## 内存诊断报告 — {package_name}")
+
     lines.append("")
     lines.append(f"- hprof 文件大小: {result.get('file_size_mb', 0):.1f} MB")
+
+    # 采样模式说明
+    parse_mode = result.get("parse_mode", "")
+    if parse_mode == "sampled":
+        sampled_from = result.get("sampled_from", 0)
+        sampled_max = result.get("sampled_max", 0)
+        lines.append(f"- 解析模式: **采样解析**（从 {sampled_from:,} 个实例中采样了 {sampled_max:,} 个）")
+        lines.append(f"- > 采样数据已具有统计代表性。如需完整精确数据，请下载 hprof 文件用 Android Studio Profiler 打开。")
+
+    # 下载链接（放在数据前面，确保 LLM 不会遗漏）
+    dump_url = result.get("dump_url", "")
+    download_section = ""
+    if dump_url:
+        download_section = (
+            f"\n**【下载完整 hprof 文件】**: [{dump_url}]({dump_url})（右键另存为，用 Android Studio Profiler 打开进行引用链深度分析）\n"
+        )
+        lines.append(download_section.strip())
+
     lines.append(f"- Top 类总内存: {result.get('total_bytes_top50', 0) / (1024 * 1024):.1f} MB")
     lines.append("")
     lines.append("| 分类 | 实例数 | 总大小 |")
@@ -67,6 +94,22 @@ def memory_diagnosis(package_name: str) -> str:
 
     lines.append("")
     lines.append(f"诊断摘要: {result.get('summary', '')}")
+
+    # 重复字符串警告
+    dupes = result.get("duplicate_strings", [])
+    if dupes:
+        lines.append("")
+        lines.append("### 重复字符串检测")
+        lines.append("以下字符串在堆中出现超过 100 次，可能存在 String.intern() 过度或字符串拼接问题：")
+        lines.append("| 字符串 | 出现次数 |")
+        lines.append("|--------|----------|")
+        for d in dupes[:5]:
+            lines.append(f"| {d['string']} | {d['count']} |")
+
+    # 底部再次强调下载链接
+    if download_section:
+        lines.append("")
+        lines.append(download_section.strip())
 
     return "\n".join(lines)
 
@@ -134,7 +177,6 @@ def heap_dump_analysis(package_name: str) -> dict:
         return result
 
     # 2.5 等待异步 dump 完成（轮询文件大小，最长 60 秒）
-    import time
     waited = 0
     while waited < 60:
         time.sleep(2)
@@ -176,37 +218,53 @@ def heap_dump_analysis(package_name: str) -> dict:
             return result
 
         file_size_mb = os.path.getsize(local_raw) / (1024 * 1024)
-        if file_size_mb > 50:
-            # 大文件：直接用 hprof-conv 转换后看基本信息
-            pass  # 继续执行，但解析器会检查 150MB 上限
+        result["file_size_mb"] = round(file_size_mb, 2)
+
+        # 3.5 保留一份 dump 文件供用户下载
+        os.makedirs(_DUMPS_DIR, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        dump_filename = f"{package_name}_{timestamp}.hprof"
+        dump_save_path = os.path.join(_DUMPS_DIR, dump_filename)
+        dump_url = None
 
         # 5. 用 hprof-conv 转换为标准格式
         hprof_conv = os.path.expanduser("~/Library/Android/sdk/platform-tools/hprof-conv")
         if not os.path.exists(hprof_conv):
-            # 尝试 PATH 中查找
             hprof_conv = "hprof-conv"
 
         conv_result = subprocess.run(
             [hprof_conv, local_raw, local_std],
-            capture_output=True, text=True, timeout=60
+            capture_output=True, text=True, timeout=120
         )
         if conv_result.returncode != 0:
-            # 如果转换失败，尝试直接解析原始文件（Android 格式）
             parse_target = local_raw
+            # 转换失败时也保留原始文件
+            try:
+                shutil.copy2(local_raw, dump_save_path)
+                dump_url = f"/dumps/{dump_filename}"
+            except Exception:
+                pass
         else:
             parse_target = local_std
+            # 保留转换后的标准格式
+            try:
+                shutil.copy2(local_std, dump_save_path)
+                dump_url = f"/dumps/{dump_filename}"
+            except Exception:
+                pass
 
         if not os.path.exists(parse_target) or os.path.getsize(parse_target) < 100:
             result["error"] = "hprof 转换后文件为空"
             return result
 
-        file_size_mb = os.path.getsize(parse_target) / (1024 * 1024)
-        result["file_size_mb"] = round(file_size_mb, 2)
+        final_mb = os.path.getsize(parse_target) / (1024 * 1024)
+        result["file_size_mb"] = round(final_mb, 2)
+        if dump_url:
+            result["dump_url"] = dump_url
 
-        # 6. 解析 hprof
+        # 6. 解析 hprof（已内置 mmap + 大文件采样）
         parsed = parse_hprof_file(parse_target)
         if "error" in parsed:
-            # hprof 过大或其他解析失败 → 回退到 dumpsys meminfo
             fallback = _fallback_meminfo(package_name, pid)
             result["success"] = True
             result["fallback"] = True
@@ -219,6 +277,10 @@ def heap_dump_analysis(package_name: str) -> dict:
 
         result["success"] = True
         result["format"] = parsed.get("format", "unknown")
+        result["parse_mode"] = parsed.get("parse_mode", "full")
+        result["sampled_from"] = parsed.get("sampled_from", 0)
+        result["sampled_max"] = parsed.get("sampled_max", 0)
+        result["duplicate_strings"] = parsed.get("duplicate_strings", [])
         result["top_classes"] = parsed.get("top_classes", [])
         result["total_instances_top50"] = parsed.get("total_instances_top50", 0)
         result["total_bytes_top50"] = parsed.get("total_bytes_top50", 0)

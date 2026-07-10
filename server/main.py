@@ -11,9 +11,18 @@ from fastapi.staticfiles import StaticFiles
 
 from server.routes.chat import router as chat_router
 from server.routes.device import router as device_router
+from server.routes.sessions import router as sessions_router
 from server.sse import sse_endpoint
+from server.db import init_db
 
-app = FastAPI(title="安卓开发助手 API", version="0.1.0")
+app = FastAPI(title="安卓开发助手 API", version="0.2.0")
+
+
+@app.on_event("startup")
+async def startup():
+    """服务启动时初始化数据库"""
+    init_db()
+
 
 # CORS 允许前端跨域访问
 app.add_middleware(
@@ -27,6 +36,7 @@ app.add_middleware(
 # 注册路由
 app.include_router(chat_router)
 app.include_router(device_router)
+app.include_router(sessions_router)
 
 # SSE 端点
 app.add_api_route("/api/stream", sse_endpoint, methods=["GET"])

@@ -1,7 +1,94 @@
 /* 安卓开发助手 - 前端主文件 (Vue 3 + Chart.js) */
 
 // ============================================================
-// 1. TrendChart 组件
+// 0. 共享会话状态
+// ============================================================
+var sessionStore = Vue.reactive({
+    currentId: null,
+    sessions: [],
+});
+
+// ============================================================
+// 1. SessionList 组件
+// ============================================================
+var SessionList = {
+    name: 'SessionList',
+    template: '#tpl-session-list',
+    data: function() {
+        return {
+            sessions: sessionStore.sessions,
+        };
+    },
+    computed: {
+        currentId: function() {
+            return sessionStore.currentId;
+        },
+    },
+    mounted: function() {
+        this.loadSessions();
+    },
+    methods: {
+        loadSessions: async function() {
+            try {
+                var res = await fetch('/api/sessions');
+                var data = await res.json();
+                sessionStore.sessions = data || [];
+            } catch (e) {
+                console.error('加载会话列表失败:', e);
+            }
+        },
+        createSession: async function() {
+            try {
+                var res = await fetch('/api/sessions', { method: 'POST' });
+                var s = await res.json();
+                sessionStore.currentId = s.id;
+                await this.loadSessions();
+                // 通知 ChatPanel 切换到新会话
+                window.dispatchEvent(new CustomEvent('session-changed', { detail: { id: s.id } }));
+            } catch (e) {
+                console.error('创建会话失败:', e);
+            }
+        },
+        switchSession: async function(id) {
+            if (sessionStore.currentId === id) return;
+            sessionStore.currentId = id;
+            window.dispatchEvent(new CustomEvent('session-changed', { detail: { id: id } }));
+        },
+        deleteSession: async function(id, event) {
+            if (!confirm('确定要删除此对话吗？所有消息将被永久删除。')) return;
+            event.stopPropagation();
+            try {
+                await fetch('/api/sessions/' + id, { method: 'DELETE' });
+                if (sessionStore.currentId === id) {
+                    sessionStore.currentId = null;
+                    window.dispatchEvent(new CustomEvent('session-changed', { detail: { id: null } }));
+                }
+                await this.loadSessions();
+                // 如果删光了，新建一个
+                if (sessionStore.sessions.length === 0) {
+                    this.createSession();
+                }
+            } catch (e) {
+                console.error('删除会话失败:', e);
+            }
+        },
+        fmtTime: function(ts) {
+            if (!ts) return '';
+            var d = new Date(ts);
+            var now = new Date();
+            var diffMs = now - d;
+            if (diffMs < 60000) return '刚刚';
+            if (diffMs < 3600000) return Math.floor(diffMs / 60000) + '分钟前';
+            if (diffMs < 86400000) return Math.floor(diffMs / 3600000) + '小时前';
+            return d.getMonth() + 1 + '/' + d.getDate() + ' ' +
+                   String(d.getHours()).padStart(2, '0') + ':' +
+                   String(d.getMinutes()).padStart(2, '0');
+        },
+    },
+};
+
+// ============================================================
+// 2. TrendChart 组件
 // ============================================================
 var TrendChart = {
     name: 'TrendChart',
@@ -80,9 +167,11 @@ var TrendChart = {
 };
 
 // ============================================================
-// 2. ChatPanel 组件
+// 3. ChatPanel 组件（基于 session_id）
 // ============================================================
-var ChatPanel = { template: '#tpl-chat-panel',
+var ChatPanel = {
+    name: 'ChatPanel',
+    template: '#tpl-chat-panel',
     data: function() {
         return {
             input: '',
@@ -91,22 +180,71 @@ var ChatPanel = { template: '#tpl-chat-panel',
             thinkingStatus: '',
             thinkingSteps: [],
             runningTools: [],
-            chatHistory: [],
         };
+    },
+    computed: {
+        sessionId: function() {
+            return sessionStore.currentId;
+        },
+    },
+    watch: {
+        sessionId: function(newId) {
+            if (newId) {
+                this.loadSessionMessages(newId);
+            } else {
+                this.messages = [];
+            }
+        },
     },
     mounted: function() {
         var self = this;
+        // 快捷操作事件
         window.addEventListener('agent-quick-action', function(e) {
             if (e.detail && e.detail.message) {
                 self.input = e.detail.message;
                 self.sendMessage();
             }
         });
+        // 会话切换事件
+        window.addEventListener('session-changed', function(e) {
+            var id = e.detail && e.detail.id;
+            if (id) {
+                self.loadSessionMessages(id);
+            } else {
+                self.messages = [];
+            }
+        });
+        // 初始加载
+        if (this.sessionId) {
+            this.loadSessionMessages(this.sessionId);
+        }
     },
     methods: {
+        loadSessionMessages: async function(sessionId) {
+            try {
+                var res = await fetch('/api/sessions/' + sessionId);
+                var data = await res.json();
+                if (data.error) return;
+                var msgs = (data.messages || []).filter(function(m) {
+                    return m.role === 'user' || m.role === 'assistant';
+                }).map(function(m) {
+                    var role = m.role === 'user' ? 'user' : 'agent';
+                    return { role: role, content: m.content, tools: [], thinking: [] };
+                });
+                this.messages = msgs;
+                var self = this;
+                this.$nextTick(function() { self.scrollToBottom(); });
+            } catch (e) {
+                console.error('加载消息失败:', e);
+            }
+        },
         sendMessage: async function() {
             var text = this.input.trim();
             if (!text || this.loading) return;
+            if (!this.sessionId) {
+                alert('请先创建或选择一个会话');
+                return;
+            }
 
             this.messages.push({ role: 'user', content: text, tools: [], thinking: [] });
             this.input = '';
@@ -125,15 +263,13 @@ var ChatPanel = { template: '#tpl-chat-panel',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         message: text,
-                        chat_history: this.chatHistory,
+                        session_id: this.sessionId,
                     }),
                 });
 
-                // 流式读取 SSE 响应
                 var reader = res.body.getReader();
                 var decoder = new TextDecoder();
                 var buffer = '';
-                var toolList = [];
                 var finalOutput = '';
 
                 while (true) {
@@ -157,10 +293,7 @@ var ChatPanel = { template: '#tpl-chat-panel',
                                     ? event.content.substring(0, 120) + '...'
                                     : event.content;
                                 this.thinkingSteps.push({ content: brief });
-                                savedThinking.push({
-                                    label: 'LLM 推理',
-                                    content: event.content,
-                                });
+                                savedThinking.push({ label: 'LLM 推理', content: event.content });
                                 this.thinkingStatus = 'LLM 正在推理...';
                                 this.$nextTick(function() { self.scrollToBottom(); });
 
@@ -208,19 +341,12 @@ var ChatPanel = { template: '#tpl-chat-panel',
                     }
                 }
 
-                // 流结束，添加最终回复
                 this.messages.push({
                     role: 'agent',
                     content: finalOutput || '抱歉，没有获取到回复。',
                     tools: savedTools,
                     thinking: savedThinking,
                 });
-
-                this.chatHistory.push(['human', text]);
-                this.chatHistory.push(['ai', finalOutput || '']);
-                if (this.chatHistory.length > 20) {
-                    this.chatHistory = this.chatHistory.slice(-20);
-                }
             } catch (err) {
                 this.messages.push({
                     role: 'agent',
@@ -253,9 +379,11 @@ var ChatPanel = { template: '#tpl-chat-panel',
 };
 
 // ============================================================
-// 3. InfoPanel 组件
+// 4. InfoPanel 组件
 // ============================================================
-var InfoPanel = { template: '#tpl-info-panel',
+var InfoPanel = {
+    name: 'InfoPanel',
+    template: '#tpl-info-panel',
     data: function() {
         return {
             deviceInfo: null,
@@ -360,9 +488,34 @@ var InfoPanel = { template: '#tpl-info-panel',
 };
 
 // ============================================================
-// 4. 初始化 Vue 应用
+// 5. 初始化 Vue 应用
 // ============================================================
-var app = Vue.createApp({});
+var app = Vue.createApp({
+    mounted: function() {
+        var self = this;
+        // 自动创建首个会话并选中
+        setTimeout(async function() {
+            try {
+                var res = await fetch('/api/sessions');
+                var data = await res.json();
+                if (!data || data.length === 0) {
+                    // 创建首个会话
+                    var cr = await fetch('/api/sessions', { method: 'POST' });
+                    var s = await cr.json();
+                    sessionStore.currentId = s.id;
+                    sessionStore.sessions = [s];
+                } else {
+                    sessionStore.sessions = data;
+                    sessionStore.currentId = data[0].id;
+                    window.dispatchEvent(new CustomEvent('session-changed', { detail: { id: data[0].id } }));
+                }
+            } catch (e) {
+                console.error('初始化会话失败:', e);
+            }
+        }, 100);
+    },
+});
+app.component('session-list', SessionList);
 app.component('trend-chart', TrendChart);
 app.component('chat-panel', ChatPanel);
 app.component('info-panel', InfoPanel);
