@@ -54,6 +54,17 @@ def parse_hprof_file(filepath: str) -> dict:
 
     if len(data) < 20:
         return {"error": f"文件太小 ({len(data)} bytes)，可能不是有效的 hprof 文件"}
+
+    file_size_mb = len(data) / (1024 * 1024)
+    if file_size_mb > 150:
+        return {
+            "error": (
+                f"hprof 文件过大 ({file_size_mb:.0f} MB)，解析耗时过长。"
+                "建议在 Android Studio Profiler 中打开此文件进行分析，"
+                "或通过命令行 dumpsys meminfo 查看实时内存概况。"
+            )
+        }
+
     return _parse_hprof(data)
 
 
@@ -98,11 +109,7 @@ def _parse_hprof(data: bytes) -> dict:
 
     _scan_records(buf, id_size, strings, class_name_map, class_serial_to_id,
                   scan_only=False, class_info=class_info,
-                  class_serial_to_id=class_serial_to_id,
-                  strings=strings,
-                  class_name_map=class_name_map,
-                  histogram=histogram,
-                  id_size=id_size)
+                  histogram=histogram)
 
     # === 构建结果 ===
     class_list = []
@@ -154,7 +161,13 @@ def _scan_records(buf, id_size, strings, class_name_map, class_serial_to_id,
                   scan_only=False, class_info=None, histogram=None,
                   **kwargs):
     """扫描 hprof 记录 — scan_only=True 只收集字符串和类映射"""
+    record_count = 0
+    MAX_RECORDS = 500000  # 安全上限，防止超大文件卡死
     while True:
+        record_count += 1
+        if record_count > MAX_RECORDS:
+            break
+
         tag_byte = buf.read(1)
         if not tag_byte:
             break
@@ -197,7 +210,13 @@ def _scan_records(buf, id_size, strings, class_name_map, class_serial_to_id,
 def _parse_heap_dump(body, id_size, strings, class_name_map,
                      class_info, class_serial_to_id, histogram):
     """解析 HEAP_DUMP 段的子记录"""
+    sub_record_count = 0
+    MAX_SUB_RECORDS = 1000000
     while True:
+        sub_record_count += 1
+        if sub_record_count > MAX_SUB_RECORDS:
+            break
+
         tag_byte = body.read(1)
         if not tag_byte:
             break

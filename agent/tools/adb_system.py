@@ -4,15 +4,28 @@ import time
 from langchain_core.tools import tool
 from agent.tools.adb_device import _run_adb
 
+# 截图保存目录（项目 web/screenshots/，自动作为静态文件被前端访问）
+_SCREENSHOT_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "web", "screenshots"
+)
+
 
 @tool
 def capture_screenshot(output_path: str = "") -> str:
     """
     截取手机屏幕截图。截图保存在手机 /sdcard 下，并拉取到 Mac 本地。
-    参数: output_path (可选) - Mac 上保存截图的目录路径，默认为当前工作目录。
-    返回截图文件的本地路径。
+    参数: output_path (可选) - Mac 上保存截图的目录路径，默认为 web/screenshots/。
+    返回截图文件的本地路径和 web 访问 URL。
+
+    重要: 请在回复中用 Markdown 图片语法展示截图，如:
+    ![](/screenshots/screenshot_20260710_143000.png)
     """
     timestamp = time.strftime("%Y%m%d_%H%M%S")
+
+    # 确保保存目录存在
+    os.makedirs(_SCREENSHOT_DIR, exist_ok=True)
+
     remote_path = f"/sdcard/screenshot_{timestamp}.png"
 
     # 截图
@@ -21,12 +34,19 @@ def capture_screenshot(output_path: str = "") -> str:
         return f"截图失败: {result}"
 
     # 拉取到本地
-    local_dir = output_path or os.getcwd()
-    local_path = os.path.join(local_dir, f"screenshot_{timestamp}.png")
+    local_dir = output_path or _SCREENSHOT_DIR
+    filename = f"screenshot_{timestamp}.png"
+    local_path = os.path.join(local_dir, filename)
     _run_adb(f"pull {remote_path} {local_path}", timeout=15)
 
     if os.path.exists(local_path):
-        return f"截图已保存到: {local_path}"
+        url = f"/screenshots/{filename}" if local_dir == _SCREENSHOT_DIR else local_path
+        return (
+            f"截图已保存。\n"
+            f"  本地路径: {local_path}\n"
+            f"  前端展示: ![]({url})\n"
+            f"请在回复中用上述 Markdown 语法展示截图。"
+        )
     return "截图拉取失败，请检查 adb 连接"
 
 

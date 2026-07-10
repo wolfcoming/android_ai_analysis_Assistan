@@ -35,22 +35,38 @@ def memory_diagnosis(package_name: str) -> str:
             "此诊断结果已确定，不要用 execute_adb_command 或其他方式再次尝试 dump。直接告知用户失败原因和解决方案。"
         )
 
-    # 构建可读的报告
-    lines = [f"## 内存诊断报告 — {package_name}", ""]
-    lines.append(f"- hprof 文件大小: {result.get('file_size_mb', 0):.1f} MB")
-    lines.append(f"- Top 50 类实例总数: {result.get('total_instances_top50', 0)}")
-    lines.append(f"- Top 50 类总内存: {result.get('total_bytes_top50', 0) / (1024 * 1024):.1f} MB")
+    # 构建报告
+    lines = []
+    if result.get("fallback"):
+        lines.append(f"## 内存诊断报告 — {package_name} (降级方案)")
+        lines.append("")
+        lines.append(f"> **注意**: hprof 解析失败（{result.get('fallback_reason', '')}），")
+        lines.append(f"> 已自动回退到 dumpsys meminfo 分析。如需完整 heap dump 分析，请使用 Android Studio Profiler。")
+    else:
+        lines.append(f"## 内存诊断报告 — {package_name}")
     lines.append("")
-    lines.append("| 类名 | 实例数 | 总大小 (MB) |")
-    lines.append("|------|--------|-------------|")
+    lines.append(f"- hprof 文件大小: {result.get('file_size_mb', 0):.1f} MB")
+    lines.append(f"- Top 类总内存: {result.get('total_bytes_top50', 0) / (1024 * 1024):.1f} MB")
+    lines.append("")
+    lines.append("| 分类 | 实例数 | 总大小 |")
+    lines.append("|------|--------|--------|")
     for c in result.get("top_classes", [])[:20]:
-        size_mb = c["total_size"] / (1024 * 1024)
-        lines.append(f"| {c['class_name']} | {c['instance_count']} | {size_mb:.1f} |")
+        if result.get("fallback"):
+            # meminfo 数据单位是 KB
+            if c["total_size"] > 1024:
+                size_str = f"{c['total_size']/1024:.1f} MB"
+            else:
+                size_str = f"{c['total_size']} KB"
+        else:
+            # hprof 数据单位是 bytes
+            if c["total_size"] > 1024 * 1024:
+                size_str = f"{c['total_size']/(1024*1024):.1f} MB"
+            else:
+                size_str = f"{c['total_size']/1024:.0f} KB"
+        lines.append(f"| {c['class_name']} | {c['instance_count']} | {size_str} |")
 
     lines.append("")
     lines.append(f"诊断摘要: {result.get('summary', '')}")
-    lines.append("")
-    lines.append("提示: 如果某个类的实例数异常多或内存占用异常高，可能存在内存泄漏。重点关注 Activity、Fragment、Bitmap、Cursor 等常见泄漏源。")
 
     return "\n".join(lines)
 
@@ -104,7 +120,7 @@ def heap_dump_analysis(package_name: str) -> dict:
         )
         return result
 
-    # 2. 在设备上 dump heap
+    # 2. 在设备上 dump heap (am dumpheap 是异步的，只发信号)
     remote_path = f"/data/local/tmp/heap_dump_{package_name.replace('.', '_')}.hprof"
     dump_cmd = f"shell am dumpheap {pid} {remote_path}"
     try:
@@ -117,16 +133,39 @@ def heap_dump_analysis(package_name: str) -> dict:
         result["error"] = f"heap dump 失败: {e}"
         return result
 
+    # 2.5 等待异步 dump 完成（轮询文件大小，最长 60 秒）
+    import time
+    waited = 0
+    while waited < 60:
+        time.sleep(2)
+        waited += 2
+        try:
+            size_output = _run_adb(f"shell stat -c %s {remote_path} 2>/dev/null", timeout=5)
+            size = int(size_output.strip())
+            if size > 1024:  # 至少 1KB 才算有效
+                break
+        except (ValueError, Exception):
+            pass
+    else:
+        result["error"] = f"heap dump 超时：等待 60 秒后文件仍为空。应用可能处于 D 状态（disk sleep）或内存太大"
+        # 清理残留空文件
+        try:
+            _run_adb(f"shell rm {remote_path}", timeout=5)
+        except Exception:
+            pass
+        return result
+
     # 3. 创建本地临时目录
     tmp_dir = tempfile.mkdtemp(prefix="hprof_")
     local_raw = os.path.join(tmp_dir, "raw.hprof")
     local_std = os.path.join(tmp_dir, "std.hprof")
 
     try:
-        # 4. 拉取 hprof 文件
+        # 4. 拉取 hprof 文件（大文件可能需要较长时间）
+        pull_timeout = 120  # 大 dump 可能需要 2 分钟
         pull_result = subprocess.run(
             ["adb", "pull", remote_path, local_raw],
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, timeout=pull_timeout
         )
         if "error" in pull_result.stdout.lower() or "error" in pull_result.stderr.lower():
             result["error"] = f"拉取 hprof 文件失败: {pull_result.stdout} {pull_result.stderr}"
@@ -135,6 +174,11 @@ def heap_dump_analysis(package_name: str) -> dict:
         if not os.path.exists(local_raw) or os.path.getsize(local_raw) < 100:
             result["error"] = "拉取的 hprof 文件为空或太小"
             return result
+
+        file_size_mb = os.path.getsize(local_raw) / (1024 * 1024)
+        if file_size_mb > 50:
+            # 大文件：直接用 hprof-conv 转换后看基本信息
+            pass  # 继续执行，但解析器会检查 150MB 上限
 
         # 5. 用 hprof-conv 转换为标准格式
         hprof_conv = os.path.expanduser("~/Library/Android/sdk/platform-tools/hprof-conv")
@@ -162,7 +206,15 @@ def heap_dump_analysis(package_name: str) -> dict:
         # 6. 解析 hprof
         parsed = parse_hprof_file(parse_target)
         if "error" in parsed:
-            result["error"] = f"hprof 解析失败: {parsed['error']}"
+            # hprof 过大或其他解析失败 → 回退到 dumpsys meminfo
+            fallback = _fallback_meminfo(package_name, pid)
+            result["success"] = True
+            result["fallback"] = True
+            result["fallback_reason"] = parsed["error"]
+            result["top_classes"] = fallback.get("categories", [])
+            result["summary"] = fallback.get("summary", "")
+            result["total_bytes_top50"] = fallback.get("total_pss_kb", 0)
+            result["total_instances_top50"] = 0
             return result
 
         result["success"] = True
@@ -226,6 +278,109 @@ def _get_pid(package_name: str) -> Optional[str]:
         pass
 
     return None
+
+
+def _fallback_meminfo(package_name: str, pid: str) -> dict:
+    """回退方案：通过 dumpsys meminfo 获取详细内存分析"""
+    try:
+        raw = _run_adb(f"shell dumpsys meminfo {pid}", timeout=15)
+    except Exception:
+        raw = ""
+
+    categories = []
+    total_pss = 0
+    in_table = False
+    saw_pss_header = False
+
+    for line in raw.split("\n"):
+        stripped = line.strip()
+
+        # 检测内存表格头（跨两行）
+        if "Pss" in stripped and "Private" in stripped:
+            saw_pss_header = True
+            continue
+        if saw_pss_header and "Total" in stripped and "Dirty" in stripped:
+            in_table = True
+            saw_pss_header = False
+            continue
+        if stripped.startswith("------"):
+            continue
+
+        # 表格结束
+        if in_table and ("App Summary" in stripped or "Objects" in stripped):
+            in_table = False
+            continue
+
+        if not in_table:
+            # 检查 App Summary 中的 TOTAL PSS
+            if "TOTAL PSS:" in stripped:
+                parts = stripped.split()
+                for p in parts:
+                    try:
+                        total_pss = int(p)
+                        break
+                    except ValueError:
+                        continue
+            # Objects 计数
+            if "Views:" in stripped or "Activities:" in stripped or "AppContexts:" in stripped:
+                parts = stripped.split(":")
+                if len(parts) >= 2:
+                    label = parts[0].strip()
+                    try:
+                        val = int(parts[1].split()[0])
+                        if val >= 0:
+                            categories.append({
+                                "class_name": label,
+                                "instance_count": val,
+                                "total_size": 0,
+                            })
+                    except (ValueError, IndexError):
+                        pass
+            continue
+
+        # 表格内的数据行
+        # 名称可能含空格（如 "Native Heap", "Dalvik Other"），需要找到名称结束位置
+        parts = stripped.split()
+        if len(parts) < 2:
+            continue
+        try:
+            # 从左边遍历，找到第一个纯数字列 = Pss Total
+            name_parts = []
+            pss_kb = 0
+            for i, p in enumerate(parts):
+                try:
+                    pss_kb = int(p)
+                    name_parts = parts[:i]
+                    break
+                except ValueError:
+                    continue
+            if not name_parts or pss_kb <= 0:
+                continue
+            label = " ".join(name_parts).rstrip(":")
+            if label and not label.startswith("---"):
+                categories.append({
+                    "class_name": label,
+                    "instance_count": 0,
+                    "total_size": pss_kb,
+                })
+        except ValueError:
+            continue
+
+    categories.sort(key=lambda x: x["total_size"], reverse=True)
+
+    summary_parts = []
+    for c in categories[:8]:
+        kb = c["total_size"]
+        if kb > 1024:
+            summary_parts.append(f"{c['class_name']}: {kb/1024:.1f} MB")
+        else:
+            summary_parts.append(f"{c['class_name']}: {kb} KB")
+
+    return {
+        "categories": categories[:20],
+        "summary": " | ".join(summary_parts),
+        "total_pss_kb": total_pss,
+    }
 
 
 def _is_debuggable(package_name: str) -> bool:

@@ -64,12 +64,13 @@
         .metric-row { display: flex; flex-wrap: wrap; gap: 6px; }
         .metric-badge { background: #0f3460; padding: 4px 10px; border-radius: 4px; font-size: 12px; }
         .metric-badge .val { color: #e94560; font-weight: 600; margin-left: 4px; }
-        .btn-pending { padding: 6px 12px; background: #2a2a4a; border: 1px dashed #666; border-radius: 4px; color: #888; font-size: 12px; cursor: pointer; }
-        .btn-pending:hover { background: #3a3a5a; color: #aaa; }
         .quick-actions { display: flex; flex-wrap: wrap; gap: 6px; }
         .quick-actions button { padding: 6px 12px; background: #0f3460; border: 1px solid #2a2a4a; border-radius: 4px; color: #e0e0e0; font-size: 12px; cursor: pointer; }
         .quick-actions button:hover { background: #1a4a7a; }
-        /* 滚动条样式 */
+        .quick-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+        /* 聊天中的图片 */
+        .msg .bubble img { max-width: 100%; border-radius: 8px; margin: 8px 0; border: 1px solid #2a2a4a; cursor: pointer; transition: transform 0.2s; }
+        .msg .bubble img:hover { transform: scale(1.02); }
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: #1a1a2e; }
         ::-webkit-scrollbar-thumb { background: #2a2a4a; border-radius: 3px; }
@@ -81,7 +82,138 @@
         <info-panel></info-panel>
     </div>
 
-    <!-- Vue 组件（所有组件合并于 app.js） -->
-    <script src="/app.js?v=4"></script>
+    <!-- ===== X-Templates ===== -->
+    <script type="text/x-template" id="tpl-trend-chart">
+        <div class="chart-container">
+            <div class="chart-legend">{{ label }}</div>
+            <canvas ref="chartCanvas"></canvas>
+        </div>
+    </script>
+
+    <script type="text/x-template" id="tpl-chat-panel">
+        <div class="chat-panel">
+            <div class="chat-header">安卓开发助手</div>
+            <div class="chat-messages" ref="msgContainer">
+                <div v-if="messages.length === 0" class="msg agent">
+                    <div class="bubble">
+                        <p>你好！我是安卓开发助手，可以帮你：</p>
+                        <ul>
+                            <li>查看设备配置和应用信息</li>
+                            <li>分析内存占用和卡顿原因</li>
+                            <li>排查崩溃和 ANR 问题</li>
+                        </ul>
+                        <p>请先确认手机已通过 USB 连接并开启调试模式。</p>
+                    </div>
+                </div>
+                <div v-for="(msg, idx) in messages" :key="idx" :class="'msg ' + msg.role">
+                    <div v-if="msg.thinking && msg.thinking.length" class="thinking-history">
+                        <div v-for="(th, ti) in msg.thinking" :key="ti" class="th-block">
+                            <span class="th-label">{{ th.label }}</span>
+                            <span class="th-text">{{ th.content }}</span>
+                        </div>
+                    </div>
+                    <div class="bubble" v-html="renderMarkdown(msg.content)"></div>
+                    <div v-if="msg.tools && msg.tools.length" class="tools-info">
+                        <div v-for="(t, i) in msg.tools" :key="i" class="tool-line">
+                            <span class="tool-done">✅ {{ t.name }}</span>
+                        </div>
+                    </div>
+                </div>
+                <div v-if="loading" class="thinking-box">
+                    <div class="thinking-status">{{ thinkingStatus }}</div>
+                    <div v-for="(th, i) in thinkingSteps" :key="'th'+i" class="th-live">
+                        <span class="th-live-icon">💭</span>
+                        <span class="th-live-text">{{ th.content }}</span>
+                    </div>
+                    <div v-for="(t, i) in runningTools" :key="'rt'+i" class="tool-line">
+                        <span v-if="t.status === 'running'" class="tool-running">⏳ {{ t.name }}: {{ t.detail }}</span>
+                        <span v-else class="tool-done">✅ {{ t.name }}: {{ t.detail }}</span>
+                    </div>
+                </div>
+            </div>
+            <div class="chat-input-area">
+                <!-- @keyup.enter="sendMessage" -->
+                <input
+                    v-model="input"
+                    placeholder="输入你的问题，如：当前连接了什么手机？微信占了多少内存？"
+                    :disabled="loading"
+                />
+                <button @click="sendMessage" :disabled="loading || !input.trim()">发送</button>
+            </div>
+        </div>
+    </script>
+
+    <script type="text/x-template" id="tpl-info-panel">
+        <div class="info-panel" v-if="!deviceError">
+            <div class="info-section">
+                <h3>设备概览</h3>
+                <div v-if="deviceInfo" class="info-grid">
+                    <div class="info-item"><span class="label">品牌:</span> <span class="value">{{ deviceInfo.brand }}</span></div>
+                    <div class="info-item"><span class="label">型号:</span> <span class="value">{{ deviceInfo.model }}</span></div>
+                    <div class="info-item"><span class="label">Android:</span> <span class="value">{{ deviceInfo.android_version }} (API {{ deviceInfo.api_level }})</span></div>
+                    <div class="info-item"><span class="label">CPU:</span> <span class="value">{{ deviceInfo.cpu_abi }} x {{ deviceInfo.cpu_cores }}核</span></div>
+                    <div class="info-item"><span class="label">分辨率:</span> <span class="value">{{ deviceInfo.screen_size }}</span></div>
+                    <div class="info-item"><span class="label">密度:</span> <span class="value">{{ deviceInfo.screen_density }}</span></div>
+                </div>
+                <div v-else class="no-device">正在加载设备信息...</div>
+            </div>
+
+            <div class="info-section">
+                <h3>目标应用</h3>
+                <div v-if="targetApp" class="info-item"><span class="value">{{ targetApp }}</span></div>
+                <div v-else class="info-item"><span class="label">请在手机上打开目标应用</span></div>
+                <input v-model="appInput" @keyup.enter="setApp" placeholder="输入包名，如 com.tencent.mm"
+                    style="margin-top:6px;padding:4px 8px;background:#0f3460;border:1px solid #2a2a4a;border-radius:4px;color:#e0e0e0;font-size:12px;width:200px;" />
+                <button @click="setApp"
+                    style="margin-left:6px;padding:4px 10px;background:#e94560;border:none;border-radius:4px;color:#fff;font-size:12px;cursor:pointer;">确认</button>
+            </div>
+
+            <div class="info-section">
+                <h3>实时性能 <span style="font-size:11px;color:#888;">(2s刷新)</span></h3>
+                <div class="metric-row">
+                    <span class="metric-badge" title="Proportional Set Size — 应用实际占用的物理内存（含按比例分摊的共享库），是评估内存占用的核心指标。持续上涨可能表示内存泄漏。">PSS: <span class="val">{{ fmtMem(metrics.pss_total) }}MB</span></span>
+                    <span class="metric-badge" title="Java 虚拟机堆内存 — Dalvik/ART 为 Java/Kotlin 对象分配的内存。频繁 GC 或堆持续增长通常意味着对象分配过多或存在泄漏。">Java Heap: <span class="val">{{ fmtMem(metrics.java_heap) }}MB</span></span>
+                    <span class="metric-badge" title="Native 堆内存 — C/C++ 代码通过 malloc/new 分配的内存，如媒体编解码、游戏引擎、自定义 Native 库。泄漏时 GC 无法回收。">Native Heap: <span class="val">{{ fmtMem(metrics.native_heap) }}MB</span></span>
+                    <span class="metric-badge" title="CPU 使用率 — 应用所有进程的 CPU 占用百分比。持续高于 30% 需关注，可能由密集计算、死循环或错误的重绘逻辑导致。">CPU: <span class="val">{{ metrics.cpu_percent }}%</span></span>
+                    <span class="metric-badge" title="每秒渲染帧数 — 基于 dumpsys gfxinfo 统计。60fps 为流畅基准，低于 30fps 用户能明显感知卡顿。需在滑动/动画时观察。">FPS: <span class="val">{{ metrics.estimated_fps }}</span></span>
+                    <span class="metric-badge" title="掉帧数 / 总渲染帧数 — Janky frame 指渲染耗时超过 16.67ms 的帧（低于 60fps）。比率越高卡顿越严重。">掉帧: <span class="val">{{ metrics.janky_count }}/{{ metrics.frame_count }}</span></span>
+                </div>
+            </div>
+
+            <div class="info-section">
+                <h3>历史趋势 (5min)</h3>
+                <trend-chart chart-id="chart-pss" label="PSS (MB)" color="#e94560" data-key="pss_total" unit="MB" ref="chartPss"></trend-chart>
+                <trend-chart chart-id="chart-jheap" label="Java Heap (MB)" color="#f0a500" data-key="java_heap" unit="MB" ref="chartJheap"></trend-chart>
+                <trend-chart chart-id="chart-nheap" label="Native Heap (MB)" color="#00b4d8" data-key="native_heap" unit="MB" ref="chartNheap"></trend-chart>
+                <trend-chart chart-id="chart-fps" label="FPS" color="#2ecc71" data-key="estimated_fps" unit="" ref="chartFps"></trend-chart>
+                <trend-chart chart-id="chart-cpu" label="CPU (%)" color="#9b59b6" data-key="cpu_percent" unit="%" ref="chartCpu"></trend-chart>
+            </div>
+
+            <div class="info-section">
+                <h3>快捷操作</h3>
+                <div class="quick-actions">
+                    <button disabled title="待完善">导出诊断报告</button>
+                    <button disabled title="待完善">切换设备</button>
+                    <button disabled title="待完善">保存对话历史</button>
+                    <button @click="quickMemoryDiagnosis" title="一键内存诊断">一键内存诊断</button>
+                    <button disabled title="待完善">一键卡顿诊断</button>
+                </div>
+            </div>
+        </div>
+        <div class="info-panel" v-else>
+            <div class="no-device">
+                <p>{{ deviceError }}</p>
+                <p style="margin-top:10px;font-size:13px;color:#666;">
+                    请确认：<br>
+                    1. 手机已通过 USB 连接 Mac<br>
+                    2. 已开启开发者模式 & USB 调试<br>
+                    3. 已在手机上授权此电脑<br>
+                    4. 运行 adb devices 确认设备已连接
+                </p>
+            </div>
+        </div>
+    </script>
+
+    <script src="/app.js?v=7"></script>
 </body>
 </html>
