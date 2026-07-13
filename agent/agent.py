@@ -1,6 +1,7 @@
 """Agent 创建与执行模块"""
 import asyncio
 import json
+import time
 
 from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.callbacks import AsyncCallbackHandler
@@ -19,6 +20,16 @@ from agent.tools import (
     get_crash_logs,
     get_anr_info,
     memory_diagnosis,
+)
+from server.logger import (
+    log_agent_thinking,
+    log_tool_call,
+    log_tool_result,
+    log_tool_error,
+    log_agent_final_answer,
+    log_agent_start,
+    log_agent_end,
+    log_error,
 )
 
 # 所有工具
@@ -65,12 +76,19 @@ class StreamingCallback(AsyncCallbackHandler):
 
     def __init__(self, queue: asyncio.Queue):
         self.queue = queue
+        self._tool_start_time = time.time()
 
     async def on_agent_action(self, action, **kwargs):
         """
         Agent 决定了下一步行动（LLM 思考完毕 → 决定调用工具）。
         action.log 包含 LLM 的推理文本。
         """
+        self._tool_start_time = time.time()
+        thought = str(action.log)[:1000] if action.log else ""
+        if thought:
+            log_agent_thinking(thought)
+        log_tool_call(action.tool, str(action.tool_input)[:100])
+
         if action.log:
             await self.queue.put({
                 "type": "thinking",
@@ -84,12 +102,16 @@ class StreamingCallback(AsyncCallbackHandler):
         })
 
     async def on_tool_end(self, output: str, **kwargs):
+        log_tool_result("", str(output)[:200], time.time() - self._tool_start_time)
+
         await self.queue.put({
             "type": "tool_end",
             "output": str(output)[:800],
         })
 
     async def on_tool_error(self, error, **kwargs):
+        log_tool_error("", str(error)[:200])
+
         await self.queue.put({
             "type": "tool_error",
             "error": str(error),
@@ -100,6 +122,9 @@ class StreamingCallback(AsyncCallbackHandler):
         Agent 执行完毕，不再调用工具。
         finish.log 包含 LLM 在给出最终回复前的推理。
         """
+        if finish.log:
+            log_agent_final_answer(str(finish.log)[:300])
+
         if finish.log:
             await self.queue.put({
                 "type": "thinking",
@@ -177,6 +202,10 @@ async def stream_agent(message: str, chat_history: list = None, context_summary:
     queue = asyncio.Queue()
     callback = StreamingCallback(queue)
 
+    # 日志：Agent 开始
+    agent_start_time = time.time()
+    log_agent_start(message, bool(chat_history), bool(context_summary))
+
     # 如果有上下文摘要，注入到系统提示中，创建临时 agent
     if context_summary:
         enhanced_system = SYSTEM_PROMPT + f"\n\n【历史对话摘要】\n{context_summary}\n"
@@ -220,6 +249,8 @@ async def stream_agent(message: str, chat_history: list = None, context_summary:
         output = result.get("output", "抱歉，没有获取到回复。")
     except Exception as e:
         output = f"❌ Agent 执行出错: {str(e)}"
+
+    log_agent_end(len(output), agent_start_time)
 
     yield f"data: {json.dumps({'type': 'output', 'content': output}, ensure_ascii=False)}\n\n"
     yield "data: {\"type\": \"done\"}\n\n"

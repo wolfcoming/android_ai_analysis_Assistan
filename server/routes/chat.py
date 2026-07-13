@@ -1,5 +1,6 @@
 """对话 API 路由 — 集成会话持久化 + 上下文压缩"""
 import json
+import time
 
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
@@ -12,6 +13,14 @@ from server.db import (
 )
 from server.compressor import compress_messages
 from agent.llm import create_llm
+from server.logger import (
+    log_request,
+    log_session_loaded,
+    log_compression_decision,
+    log_compression_done,
+    log_response_saved,
+    log_error,
+)
 
 router = APIRouter()
 
@@ -44,6 +53,9 @@ async def chat(request: ChatRequest):
     session_id = request.session_id
     user_message = request.message
 
+    # 日志：请求进入
+    log_request(session_id or "(旧格式兼容)", user_message)
+
     # ---- 兼容旧格式（无 session_id） ----
     if not session_id:
         if request.chat_history and len(request.chat_history) > 0:
@@ -71,15 +83,25 @@ async def chat(request: ChatRequest):
 
     # 从 DB 加载消息历史
     db_messages = get_messages(session_id, include_compressed=False)
+    log_session_loaded(len(db_messages), session.get("title", "新对话"))
 
     # 上下文压缩
     context_summary = ""
     if db_messages:
+        from server.compressor import estimate_messages_tokens, COMPRESS_THRESHOLD, build_compressible_blocks
+        total_tokens = estimate_messages_tokens(db_messages)
+        if total_tokens > COMPRESS_THRESHOLD:
+            older, recent, _ = build_compressible_blocks(db_messages)
+            log_compression_decision(total_tokens, COMPRESS_THRESHOLD, len(older), len(recent))
+
+        compress_start = time.time()
         summary, compressed_ids = await compress_messages(
             db_messages,
             _call_llm_for_summary,
         )
         if summary:
+            compress_elapsed = time.time() - compress_start
+            log_compression_done(len(summary), compress_elapsed)
             mark_compressed(compressed_ids)
             # 添加摘要到 DB
             add_message(session_id, "summary", summary)
@@ -127,6 +149,7 @@ async def chat(request: ChatRequest):
         if final_output:
             add_message(session_id, "assistant", final_output)
             touch_session(session_id)
+            log_response_saved(len(final_output))
 
     return StreamingResponse(
         event_stream(),

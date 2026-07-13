@@ -3,6 +3,7 @@
 import re
 from typing import Optional
 
+
 # 压缩阈值（Token 数），超过时触发摘要压缩
 COMPRESS_THRESHOLD = 8000
 
