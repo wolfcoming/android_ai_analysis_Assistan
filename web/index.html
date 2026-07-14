@@ -200,6 +200,53 @@
                     style="margin-left:6px;padding:4px 10px;background:#e94560;border:none;border-radius:4px;color:#fff;font-size:12px;cursor:pointer;">确认</button>
             </div>
 
+            <div class="info-section" v-if="ragReady">
+                <h3>项目知识库</h3>
+                <div v-if="ragError" style="color:#e94560;font-size:12px;margin-bottom:6px;">{{ ragError }}</div>
+                <div style="display:flex;gap:6px;margin-bottom:8px;">
+                    <input v-model="ragProjectName" placeholder="项目名称（必填）"
+                        style="flex:1;padding:5px 8px;background:#0f3460;border:1px solid #2a2a4a;border-radius:4px;color:#e0e0e0;font-size:12px;" />
+                    <input v-model="ragProjectPath" placeholder="项目路径（必填）"
+                        style="flex:1;padding:5px 8px;background:#0f3460;border:1px solid #2a2a4a;border-radius:4px;color:#e0e0e0;font-size:12px;" />
+                    <button @click="ragBrowseFolder" :disabled="ragIndexing"
+                        style="padding:5px 8px;background:#0f3460;border:1px solid #2a2a4a;border-radius:4px;color:#e0e0e0;font-size:12px;cursor:pointer;white-space:nowrap;"
+                        title="浏览文件夹">选择</button>
+                    <button @click="ragStartIndex" :disabled="ragIndexing"
+                        style="padding:5px 12px;background:#e94560;border:none;border-radius:4px;color:#fff;font-size:12px;cursor:pointer;white-space:nowrap;">
+                        {{ ragIndexing ? '索引中...' : '开始索引' }}
+                    </button>
+                </div>
+                <div v-if="ragActiveProject" style="background:#0f3460;border-radius:6px;padding:8px 10px;font-size:12px;">
+                    <div style="margin-bottom:3px;">
+                        当前项目: <span style="color:#e94560;font-weight:600;">{{ ragActiveProject.name }}</span>
+                        <span v-if="ragActiveProject.status==='ready'" style="color:#2ecc71;"> 已激活</span>
+                        <span v-else-if="ragActiveProject.status==='indexing'" style="color:#f0a500;">
+                            {{ ragActiveProject.current_step }} {{ ragActiveProject.progress }}%
+                            <span v-if="ragActiveProject.current && ragActiveProject.total"
+                                style="color:#aaa;font-size:11px;">
+                                ({{ ragActiveProject.current }}/{{ ragActiveProject.total }})
+                            </span>
+                        </span>
+                        <span v-else-if="ragActiveProject.status==='error'" style="color:#e94560;"> 出错</span>
+                    </div>
+                    <div v-if="ragActiveProject.status==='ready'" style="color:#888;">
+                        文件: {{ ragActiveProject.file_count }} | 代码块: {{ ragActiveProject.chunk_count }}
+                    </div>
+                    <div v-if="ragActiveProject.status==='error'" style="color:#e94560;">
+                        {{ ragActiveProject.error }}
+                    </div>
+                </div>
+                <div v-if="ragOtherProjects.length > 0" style="margin-top:6px;font-size:11px;color:#888;">
+                    已索引项目:
+                    <span v-for="p in ragOtherProjects" :key="p.name"
+                        style="margin-left:8px;background:#1a2a4a;padding:2px 8px;border-radius:3px;">
+                        {{ p.name }}
+                        <a href="#" @click.prevent="ragActivate(p.name)" style="color:#e94560;margin-left:4px;">切换</a>
+                        <a href="#" @click.prevent="ragDelete(p.name)" style="color:#888;margin-left:4px;">×</a>
+                    </span>
+                </div>
+            </div>
+
             <div class="info-section">
                 <h3>实时性能 <span style="font-size:11px;color:#888;">(2s刷新)</span></h3>
                 <div class="metric-row">
@@ -246,6 +293,6 @@
         </div>
     </script>
 
-    <script src="/app.js?v=9"></script>
+    <script src="/app.js?v=15"></script>
 </body>
 </html>

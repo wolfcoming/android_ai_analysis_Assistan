@@ -7,7 +7,7 @@ from langchain_core.tools import tool
 def _run_adb(command: str, timeout: int = 30) -> str:
     """执行 ADB 命令并返回输出"""
     try:
-        print(f"[ADB] 执行命令: adb {command}")
+        # print(f"[ADB] 执行命令: adb {command}")
         full_cmd = ["adb"] + command.split()
         result = subprocess.run(full_cmd, capture_output=True, text=True, timeout=timeout)
         output = result.stdout.strip()
@@ -16,7 +16,7 @@ def _run_adb(command: str, timeout: int = 30) -> str:
             if stderr:
                 output += f"\n[stderr]: {stderr}"
                 print(f"[ADB] stderr: {stderr[:200]}")
-        print(f"[ADB] 返回: {output[:200] if output else '(无输出)'}")
+        # print(f"[ADB] 返回: {output[:200] if output else '(无输出)'}")
         return output if output else "(无输出)"
     except subprocess.TimeoutExpired:
         print(f"[ADB] 超时错误: {timeout}s")

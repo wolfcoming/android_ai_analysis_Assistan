@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from server.routes.chat import router as chat_router
 from server.routes.device import router as device_router
 from server.routes.sessions import router as sessions_router
+from server.routes.rag import router as rag_router
 from server.sse import sse_endpoint
 from server.db import init_db
 from server.config import WEB_DIR, ensure_directories
@@ -76,6 +77,7 @@ app.add_middleware(
 app.include_router(chat_router, tags=["对话"])
 app.include_router(device_router, tags=["设备"])
 app.include_router(sessions_router, tags=["会话"])
+app.include_router(rag_router, tags=["知识库"])
 
 # SSE 实时指标端点
 app.add_api_route("/api/stream", sse_endpoint, methods=["GET"], tags=["实时"])
@@ -90,5 +92,5 @@ async def health():
 # ============================================================
 app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="static")
 
-print("  🌐 API 路由已注册: /api/chat, /api/sessions, /api/device/*, /api/stream, /api/health")
+print("  🌐 API 路由已注册: /api/chat, /api/sessions, /api/device/*, /api/stream, /api/rag/*, /api/health")
 print("  📄 前端入口: http://localhost:8783/")

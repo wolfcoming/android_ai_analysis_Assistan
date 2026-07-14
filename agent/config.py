@@ -15,6 +15,7 @@ from agent.tools import (
     get_crash_logs,
     get_anr_info,
     memory_diagnosis,
+    query_android_code,
 )
 
 # ============================================================
@@ -44,6 +45,9 @@ TOOLS = [
 
     # 深度诊断
     memory_diagnosis,       # 一键内存诊断（heap dump → 解析 → 报告）
+
+    # 代码检索
+    query_android_code,     # 检索当前激活 Android 项目的源码
 ]
 
 # ============================================================

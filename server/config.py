@@ -54,8 +54,18 @@ METRICS_MIN_INTERVAL = 1.5
 # Agent 最大推理轮次
 AGENT_MAX_ITERATIONS = 15
 
+# ============================================================
+# RAG 知识库配置
+# ============================================================
+
+# ChromaDB 持久化目录（Android 项目代码向量库）
+CHROMA_PROJECTS_DIR = os.path.join(PROJECT_ROOT, "chroma_projects")
+
+# RAG 项目管理元数据文件
+RAG_PROJECTS_FILE = os.path.join(PROJECT_ROOT, "rag_projects.json")
+
 
 def ensure_directories():
     """确保所有运行时需要的目录存在"""
-    for d in [SCREENSHOT_DIR, DUMPS_DIR]:
+    for d in [SCREENSHOT_DIR, DUMPS_DIR, CHROMA_PROJECTS_DIR]:
         os.makedirs(d, exist_ok=True)

@@ -1,0 +1,17 @@
+{
+  "中新网": {
+    "name": "中新网",
+    "path": "/Users/yangqing/project/zxw/chinanewsapp-formal-android/zxs",
+    "collection_name": "project_____58ef16",
+    "active": false,
+    "status": "indexing",
+    "progress": 76,
+    "current_step": "向量化中",
+    "current": 16700,
+    "total": 42304,
+    "file_count": 2194,
+    "chunk_count": 42304,
+    "indexed_at": null,
+    "error": null
+  }
+}

@@ -109,7 +109,7 @@ def get_foreground_app() -> str:
     for part in result.split():
         if "/" in part and "." in part:
             pkg = part.split("/")[0]
-            print(f"[foreground] 检测到前台应用: {pkg}")
+            # print(f"[foreground] 检测到前台应用: {pkg}")
             return pkg
     print(f"[foreground] 无法从前台activity提取包名: {result[:100]}")
     return ""

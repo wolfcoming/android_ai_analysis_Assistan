@@ -394,14 +394,26 @@ var InfoPanel = {
             trendData: [],
             evtSource: null,
             refreshTimer: null,
+            // RAG 知识库数据
+            ragReady: false,
+            ragProjectName: '',
+            ragProjectPath: '',
+            ragIndexing: false,
+            ragError: '',
+            ragActiveProject: null,
+            ragProjects: [],
+            ragOtherProjects: [],
+            ragPollTimer: null,
         };
     },
     mounted: function() {
         this.loadDeviceInfo();
         this.startSSE();
+        this.ragLoadProjects();
     },
     beforeUnmount: function() {
         this.stopSSE();
+        this.ragStopPolling();
         if (this.refreshTimer) clearInterval(this.refreshTimer);
     },
     methods: {
@@ -474,6 +486,175 @@ var InfoPanel = {
         fmtMem: function(kb) {
             if (!kb) return '0.0';
             return (kb / 1024).toFixed(1);
+        },
+        // ---- RAG 知识库方法 ----
+        ragBrowseFolder: async function() {
+            this.ragError = '';
+            try {
+                var res = await fetch('/api/rag/browse-folder');
+                var data = await res.json();
+                if (data.path) {
+                    this.ragProjectPath = data.path;
+                } else if (data.error) {
+                    this.ragError = data.error;
+                }
+            } catch (e) {
+                console.error('浏览文件夹失败:', e);
+                this.ragError = '浏览文件夹失败: ' + e.message;
+            }
+        },
+        ragLoadProjects: async function() {
+            try {
+                var res = await fetch('/api/rag/projects');
+                var data = await res.json();
+                if (data.error) { this.ragReady = true; return; }
+                this.ragProjects = data.projects || [];
+                // 找到激活的项目
+                this.ragActiveProject = null;
+                for (var i = 0; i < this.ragProjects.length; i++) {
+                    if (this.ragProjects[i].active) {
+                        this.ragActiveProject = this.ragProjects[i];
+                        break;
+                    }
+                }
+                this.ragUpdateOtherProjects();
+                // 如果有项目正在索引，开始轮询
+                for (var j = 0; j < this.ragProjects.length; j++) {
+                    if (this.ragProjects[j].status === 'indexing') {
+                        this.ragStartPolling(this.ragProjects[j].name);
+                        break;
+                    }
+                }
+                this.ragReady = true;
+            } catch (e) {
+                console.error('加载RAG项目失败:', e);
+                this.ragReady = true;
+            }
+        },
+        ragUpdateOtherProjects: function() {
+            var activeName = this.ragActiveProject ? this.ragActiveProject.name : '';
+            this.ragOtherProjects = this.ragProjects.filter(function(p) {
+                return p.name !== activeName;
+            });
+        },
+        ragStartIndex: async function() {
+            var name = this.ragProjectName.trim();
+            var path = this.ragProjectPath.trim();
+            if (!name) { this.ragError = '请输入项目名称'; return; }
+            if (!path) { this.ragError = '请输入项目路径'; return; }
+            this.ragError = '';
+            this.ragIndexing = true;
+
+            try {
+                var res = await fetch('/api/rag/projects', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name, path: path }),
+                });
+                var data = await res.json();
+                if (res.status !== 200 && res.status !== 202) {
+                    this.ragError = (data.detail || '创建失败');
+                    this.ragIndexing = false;
+                    return;
+                }
+                this.ragStartPolling(name);
+                this.ragProjectName = '';
+                this.ragProjectPath = '';
+            } catch (e) {
+                this.ragError = '请求失败: ' + e.message;
+                this.ragIndexing = false;
+            }
+        },
+        ragStartPolling: function(name) {
+            this.ragStopPolling();
+            var self = this;
+            this.ragPollTimer = setInterval(async function() {
+                try {
+                    var res = await fetch('/api/rag/projects/' + encodeURIComponent(name) + '/status');
+                    var data = await res.json();
+                    if (data.error) return;
+
+                    // 更新项目信息
+                    var found = false;
+                    for (var i = 0; i < self.ragProjects.length; i++) {
+                        if (self.ragProjects[i].name === name) {
+                            // 用整个对象替换，确保 Vue 3 响应式触发
+                            self.ragProjects[i] = data;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        self.ragProjects.push(data);
+                    }
+
+                    // 如果是激活项目或正在索引，设为活动
+                    // 必须用数组中已更新的引用，保证和 ragProjects 同一对象
+                    if (data.active || data.status === 'indexing') {
+                        for (var j = 0; j < self.ragProjects.length; j++) {
+                            if (self.ragProjects[j].name === name) {
+                                self.ragActiveProject = self.ragProjects[j];
+                                break;
+                            }
+                        }
+                    }
+                    self.ragUpdateOtherProjects();
+
+                    if (data.status === 'ready' || data.status === 'error') {
+                        self.ragStopPolling();
+                        self.ragIndexing = false;
+                    }
+                } catch (e) {
+                    // 忽略轮询错误
+                }
+            }, 2000);
+        },
+        ragStopPolling: function() {
+            if (this.ragPollTimer) {
+                clearInterval(this.ragPollTimer);
+                this.ragPollTimer = null;
+            }
+        },
+        ragActivate: async function(name) {
+            try {
+                var res = await fetch('/api/rag/projects/' + encodeURIComponent(name) + '/activate', {
+                    method: 'PUT',
+                });
+                var data = await res.json();
+                if (data.error) {
+                    this.ragError = data.error;
+                    return;
+                }
+                await this.ragLoadProjects();
+            } catch (e) {
+                this.ragError = '切换失败: ' + e.message;
+            }
+        },
+        ragDelete: async function(name) {
+            if (!confirm('确定要删除项目 "' + name + '" 的知识库索引吗？')) return;
+            try {
+                var res = await fetch('/api/rag/projects/' + encodeURIComponent(name), {
+                    method: 'DELETE',
+                });
+                var data = await res.json();
+                if (data.error) {
+                    this.ragError = data.error;
+                    return;
+                }
+                if (this.ragActiveProject && this.ragActiveProject.name === name) {
+                    this.ragActiveProject = null;
+                }
+                await this.ragLoadProjects();
+            } catch (e) {
+                this.ragError = '删除失败: ' + e.message;
+            }
+        },
+        ragFmtTime: function(ts) {
+            if (!ts) return '';
+            var d = new Date(ts);
+            return (d.getMonth() + 1) + '/' + d.getDate() + ' ' +
+                   String(d.getHours()).padStart(2, '0') + ':' +
+                   String(d.getMinutes()).padStart(2, '0');
         },
         quickMemoryDiagnosis: function() {
             if (!this.targetApp) {
